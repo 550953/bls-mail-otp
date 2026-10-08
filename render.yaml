@@ -1,0 +1,18 @@
+services:
+  - type: web
+    name: otp-broker
+    runtime: python
+    plan: starter            # free-план засыпает и теряет задания в памяти
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /health
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.9
+      - key: API_KEY
+        sync: false
+      - key: DASH_USER
+        sync: false
+      - key: DASH_PASS
+        sync: false
+      # CENTRAL_* переменные удобнее вставить пачкой: Environment -> Add from .env
