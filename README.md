@@ -44,3 +44,7 @@ requests.post(f"{URL}/api/tasks/{tid}/ack", headers=H)
 
 ## Дашборд
 `GET /` — логин/пароль `DASH_USER` / `DASH_PASS` (Basic Auth).
+
+Вёрстка лежит в `static/dashboard.html` (правится как обычный HTML), логотип и значки — в `static/`
+(`logo.png`, `mark.png`, `favicon.png`; открыты без пароля, остальное в `static/` не раздаётся).
+График за 24 часа, лента событий и средняя задержка хранятся только в памяти и обнуляются при перезапуске.

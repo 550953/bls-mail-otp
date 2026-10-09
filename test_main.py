@@ -28,7 +28,7 @@ except ImportError:  # нет fastapi — подставляем заглушк�
     fa.FastAPI, fa.HTTPException = FastAPI, HTTPException
     fa.Depends, fa.Header = (lambda *a, **k: None), (lambda *a, **k: "")
     resp = types.ModuleType("fastapi.responses")
-    resp.HTMLResponse = object
+    resp.HTMLResponse = resp.FileResponse = object
     sec = types.ModuleType("fastapi.security")
     sec.HTTPBasic, sec.HTTPBasicCredentials = (lambda **k: None), object
     pyd = types.ModuleType("pydantic")

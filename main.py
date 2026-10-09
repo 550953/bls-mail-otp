@@ -17,10 +17,11 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from email.header import decode_header
 from email.utils import parsedate_to_datetime
+from pathlib import Path
 from typing import Optional
 
 from fastapi import Depends, FastAPI, Header, HTTPException
-from fastapi.responses import HTMLResponse
+from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from pydantic import BaseModel
 
@@ -66,6 +67,21 @@ LOCK = threading.RLock()
 TASKS: dict = {}
 MAILS: deque = deque(maxlen=300)
 SEEN: dict = {}
+START = time.time()
+EVENTS: deque = deque(maxlen=80)    # лента событий для дашборда (только в памяти)
+HOURLY: dict = {}                   # час -> {ready, delivered, failed}: график за 24 ч
+LAT: deque = deque(maxlen=100)      # сколько секунд от задания до письма
+BASE = Path(__file__).resolve().parent
+
+
+def event(kind, who="", note=""):
+    EVENTS.appendleft({"ts": time.time(), "kind": kind, "who": who, "note": note})
+
+
+def bump(field):
+    with LOCK:
+        h = HOURLY.setdefault(int(time.time() // 3600), {"ready": 0, "delivered": 0, "failed": 0})
+        h[field] += 1
 
 
 # ============================================================ разбор писем
@@ -164,6 +180,9 @@ def fits(t, m, loose=False):
 def assign(t, m):
     t.update(status="ready", code=m["code"], link=m["link"], kind=m["kind"], ready_at=time.time())
     m["used_by"] = t["id"]
+    bump("ready")
+    LAT.append(max(0.0, t["ready_at"] - t["created"]))
+    event("ready", t["email"], m["kind"])
     log.info("task %s <- %s for %s", t["id"], m["kind"], t["email"])
 
 
@@ -193,12 +212,18 @@ def sweep():
         for t in TASKS.values():
             if t["status"] == "waiting" and now - t["created"] > TASK_TTL:
                 t["status"] = "expired"
+                bump("failed")
+                event("expired", t["email"])
             elif t["status"] == "ready" and now - t["ready_at"] > CLAIM_TTL:
                 t["status"] = "not_collected"
+                bump("failed")
+                event("not_collected", t["email"])
         for k in [k for k, t in TASKS.items() if now - t["created"] > 3 * 3600]:
             del TASKS[k]
         for k in [k for k, v in SEEN.items() if now - v > 7200]:
             del SEEN[k]
+        for k in [k for k in HOURLY if k < now // 3600 - 26]:
+            del HOURLY[k]
 
 
 def sweeper():
@@ -236,10 +261,14 @@ class Central:
                     c.login(self.login, self.pw)
                     self.conn = c
                 self.poll()
+                if self.status == "error":
+                    event("central_ok", self.login)
                 self.status, self.error, self.last_ok, self.fails = "online", "", time.time(), 0
                 STOP.wait(POLL)
             except Exception as e:
                 self.fails += 1
+                if self.status != "error":
+                    event("central_error", self.login, type(e).__name__)
                 self.status, self.error = "error", f"{type(e).__name__}: {e}"[:200]
                 log.warning("central %s: %s", self.n, self.error)
                 self.close()
@@ -406,6 +435,8 @@ def get_task(tid: str):
         if t["status"] in ("ready", "delivered"):
             if t["status"] == "ready":
                 t.update(status="delivered", delivered_at=time.time())
+                bump("delivered")
+                event("delivered", t["email"], t["kind"] or "")
             out.update(status="delivered", type=t["kind"], code=t["code"] or None,
                        link=t["link"] or None)
         elif t["status"] == "waiting":
@@ -437,8 +468,14 @@ def dash_state():
         tasks = sorted(TASKS.values(), key=lambda t: -t["created"])
         stats = {k: sum(1 for t in tasks if t["status"] == k)
                  for k in ("waiting", "ready", "delivered", "expired", "not_collected")}
+        cur = int(now // 3600)
+        hourly = [{"h": (cur - i) * 3600, **HOURLY.get(cur - i, {"ready": 0, "delivered": 0, "failed": 0})}
+                  for i in range(23, -1, -1)]
         return {
             "configured": bool(API_KEY), "accounts": len(ACCOUNTS), "stats": stats,
+            "now": now, "uptime": now - START, "hourly": hourly,
+            "latency": (sum(LAT) / len(LAT)) if LAT else None,
+            "events": list(EVENTS)[:30],
             "centrals": [{"n": c.n, "login": c.login, "subs": len(c.subs), "status": c.status,
                           "error": c.error, "poll_age": (now - c.last_ok) if c.last_ok else None,
                           "mails": c.mails} for c in CENTRALS],
@@ -458,49 +495,20 @@ def dashboard():
     return DASH_HTML
 
 
-DASH_HTML = """<!doctype html><html lang="ru"><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1"><title>OTP Farm</title>
-<style>
-:root{--bg:#0f1115;--card:#171a21;--line:#262b36;--tx:#e6e8ee;--mut:#8a93a6;--ok:#3ddc84;--warn:#f5b942;--bad:#ff5d6c;--info:#5aa9ff}
-*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--tx);font:14px/1.45 system-ui,sans-serif;padding:16px}
-h1{font-size:18px;margin:0 0 12px;display:flex;gap:10px;align-items:center}
-.pill{font-size:12px;padding:2px 10px;border-radius:99px;background:var(--line)}
-.stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:10px;margin-bottom:14px}
-.card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:10px 12px}
-.card b{display:block;font-size:22px}.card span{color:var(--mut);font-size:12px}
-section{margin-bottom:16px}h2{font-size:12px;color:var(--mut);text-transform:uppercase;letter-spacing:.06em;margin:0 0 6px}
-.wrap{overflow-x:auto;border:1px solid var(--line);border-radius:10px;background:var(--card)}
-table{width:100%;border-collapse:collapse}th,td{padding:7px 10px;text-align:left;border-bottom:1px solid var(--line);white-space:nowrap}
-th{color:var(--mut);font-weight:500;font-size:12px}tr:last-child td{border:0}
-.code{font:600 15px ui-monospace,monospace;letter-spacing:.08em}
-.tag{padding:1px 8px;border-radius:6px;font-size:12px}
-.w{background:#3a3220;color:var(--warn)}.r{background:#16372a;color:var(--ok)}.d{background:#1b2d46;color:var(--info)}.e{background:#3b1f25;color:var(--bad)}
-.dot{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:6px}
-.empty{color:var(--mut);text-align:center;padding:14px}
-</style></head><body>
-<h1>OTP Farm <span class="pill" id="pill">…</span></h1>
-<div class="stats" id="stats"></div>
-<section><h2>Задания</h2><div id="tasks"></div></section>
-<section><h2>Последние коды</h2><div id="mails"></div></section>
-<section><h2>Центральные ящики</h2><div id="centrals"></div></section>
-<script>
-const $=s=>document.querySelector(s),esc=s=>String(s??"").replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
-const ST={waiting:["Ждёт","w"],ready:["Код пришёл","r"],delivered:["Получено","d"],expired:["Протух","e"],not_collected:["Не забрал","e"]};
-const KD={registration:"Регистрация",application:"Анкета",password:"Пароль",consent:"Согласие (ссылка)",unknown:"Не определён",any:"Любой"};
-const age=s=>s==null?"—":s<60?Math.round(s)+" с":Math.floor(s/60)+" мин";
-const tag=s=>{const[a,b]=ST[s]||[s,"w"];return `<span class="tag ${b}">${a}</span>`};
-const tbl=(h,rows)=>`<div class="wrap"><table><tr>${h.map(x=>`<th>${x}</th>`).join("")}</tr>${rows||`<tr><td class="empty" colspan="${h.length}">Пусто</td></tr>`}</table></div>`;
-function render(s){
- const on=s.centrals.filter(c=>c.status==="online").length,T=s.stats;
- $("#pill").textContent=s.configured?"работает":"НЕ ЗАПУЩЕН (нет API_KEY)";
- $("#pill").style.color=s.configured?"var(--ok)":"var(--bad)";
- $("#stats").innerHTML=[["Централы онлайн",on+" / "+s.centrals.length],["Аккаунтов",s.accounts],["Ждут",T.waiting],["Код пришёл",T.ready],["Получено",T.delivered],["Протухло",T.expired],["Не забрал",T.not_collected]]
-  .map(([a,b])=>`<div class="card"><b>${b}</b><span>${a}</span></div>`).join("");
- $("#tasks").innerHTML=tbl(["ID","Аккаунт","Тип","Статус","Код","Возраст"],s.tasks.map(t=>`<tr><td>${esc(t.id)}</td><td>${esc(t.email)}</td><td>${KD[t.type]||esc(t.type)}</td><td>${tag(t.status)}</td><td class="code">${esc(t.code||(t.has_link?"ссылка":""))}</td><td>${age(t.age)}</td></tr>`).join(""));
- $("#mails").innerHTML=tbl(["Время","Ц.","Аккаунт","Тип","Код","Задание","Тема"],s.mails.map(m=>`<tr><td>${new Date(m.ts*1000).toLocaleTimeString("ru-RU")}</td><td>${m.central}</td><td>${esc(m.account)}</td><td>${KD[m.kind]||esc(m.kind)}</td><td class="code">${esc(m.code||(m.has_link?"ссылка":""))}</td><td>${esc(m.used_by||"—")}</td><td>${esc(m.subject)}</td></tr>`).join(""));
- $("#centrals").innerHTML=tbl(["№","Ящик","Акк.","Статус","Опрос","Писем BLS","Ошибка"],s.centrals.map(c=>{const col=c.status==="online"?"ok":c.status==="error"?"bad":"warn";return `<tr><td>${c.n}</td><td>${esc(c.login)}</td><td>${c.subs}</td><td><span class="dot" style="background:var(--${col})"></span>${c.status}</td><td>${age(c.poll_age)} назад</td><td>${c.mails}</td><td>${esc(c.error)}</td></tr>`}).join(""));
-}
-async function load(){try{const r=await fetch("/dash/state");if(!r.ok)throw r.status;render(await r.json())}catch(e){$("#pill").textContent="нет связи";$("#pill").style.color="var(--bad)"}}
-load();setInterval(load,3000);
-</script></body></html>
-"""
+# логотип и значки открыты без пароля: браузер просит фавикон до логина
+STATIC_FILES = {"logo-wide.png", "favicon.png"}
+
+
+@app.get("/static/{name}")
+def static_file(name: str):
+    if name not in STATIC_FILES:
+        raise HTTPException(404, "not found")
+    return FileResponse(BASE / "static" / name, headers={"Cache-Control": "public, max-age=86400"})
+
+
+@app.get("/favicon.ico", include_in_schema=False)
+def favicon():
+    return FileResponse(BASE / "static" / "favicon.png", media_type="image/png")
+
+
+DASH_HTML = (BASE / "static" / "dashboard.html").read_text(encoding="utf-8")
