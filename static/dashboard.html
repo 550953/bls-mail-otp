@@ -137,6 +137,7 @@ td.sbj{max-width:300px;overflow:hidden;text-overflow:ellipsis}
 .tag.e{background:var(--bad-soft);color:var(--bad)}
 .code{font:700 14px ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;letter-spacing:.1em;background:var(--blue-soft);color:var(--navy);border:0;border-radius:7px;padding:3px 9px;cursor:pointer}
 .code:hover{background:#D8E7FD}
+a.code{text-decoration:none;display:inline-block}
 .code.link{letter-spacing:0;font-family:inherit;font-weight:700;font-size:12px}
 .q{position:relative}
 .q input{font:inherit;font-size:13px;width:220px;max-width:100%;padding:8px 12px 8px 34px;border:1px solid var(--line);border-radius:9px;background:#fff;color:var(--ink)}
@@ -268,7 +269,7 @@ const I={
 const svg=(n,c="")=>`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" ${c?`class="${c}"`:""} aria-hidden="true">${I[n]}</svg>`;
 
 const ST={waiting:["Ждёт письма","w"],ready:["Код пришёл","r"],delivered:["Получено","d"],expired:["Протухло","e"],not_collected:["Не забрали","e"]};
-const KD={registration:"Регистрация",application:"Анкета",password:"Пароль",consent:"Согласие (ссылка)",unknown:"Не определён",any:"Любой"};
+const KD={registration:"Регистрация",application:"Анкета",password:"Пароль",consent:"Согласие (ссылка)",activation:"Активация (ссылка)",unknown:"Не определён",any:"Любой"};
 const EV={
  ready:["Код пришёл","blue","mail"],delivered:["Клиент забрал код","ok","check"],
  expired:["Задание протухло","bad","clock"],not_collected:["Клиент не забрал код","bad","x"],
@@ -276,6 +277,8 @@ const EV={
 };
 const CS={online:["Онлайн","ok"],error:["Ошибка","bad"],idle:["Запускается","warn"]};
 
+// ссылка активации/согласия: клик открывает её в новой вкладке (ссылка одноразовая — открывать один раз)
+const lnk=u=>/^https:\/\//.test(u||"")?`<a class="code link" href="${esc(u)}" target="_blank" rel="noopener noreferrer" title="Открыть ссылку в новой вкладке">ссылка ↗</a>`:`<span class="code link" style="cursor:default">ссылка</span>`;
 const tag=s=>{const[a,b]=ST[s]||[s,"w"];return `<span class="tag ${b}">${a}</span>`};
 const tbl=(h,rows,empty)=>`<table><thead><tr>${h.map(x=>`<th scope="col">${x}</th>`).join("")}</tr></thead><tbody>${rows||`<tr><td class="empty" colspan="${h.length}">${empty}</td></tr>`}</tbody></table>`;
 
@@ -349,13 +352,13 @@ function render(s){
   const q=$("#q").value.trim().toLowerCase();
   const tasks=s.tasks.filter(t=>!q||t.email.includes(q)||t.id.includes(q));
   $("#tasktbl").innerHTML=tbl(["ID","Аккаунт","Тип","Статус","Код","Возраст"],tasks.map(t=>{
-    const res=t.code?`<button class="code" data-copy="${esc(t.code)}" title="Нажмите, чтобы скопировать">${esc(t.code)}</button>`:t.has_link?`<span class="code link" style="cursor:default">ссылка</span>`:"";
+    const res=t.code?`<button class="code" data-copy="${esc(t.code)}" title="Нажмите, чтобы скопировать">${esc(t.code)}</button>`:t.has_link?lnk(t.link):"";
     return `<tr><td>${esc(t.id)}</td><td>${esc(t.email)}</td><td>${KD[t.type]||esc(t.type)}</td><td>${tag(t.status)}</td><td>${res}</td><td>${age(t.age)}</td></tr>`}).join(""),
     q?"Ничего не найдено":"Заданий пока нет. Они появятся, когда клиент вызовет POST /api/tasks.");
 
   // письма
   $("#mailtbl").innerHTML=tbl(["Время","Ящик","Аккаунт","Тип","Код","Задание","Тема"],s.mails.map(m=>
-    `<tr><td>${hms(m.ts)}</td><td>${m.central}</td><td${m.account==="?"?' title="Аккаунт в письме не определился"':""}>${esc(m.account)}</td><td>${KD[m.kind]||esc(m.kind)}</td><td>${m.code?`<button class="code" data-copy="${esc(m.code)}" title="Нажмите, чтобы скопировать">${esc(m.code)}</button>`:m.has_link?`<span class="code link" style="cursor:default">ссылка</span>`:""}</td><td>${esc(m.used_by||"—")}</td><td class="sbj" title="${esc(m.subject)}">${esc(m.subject)}</td></tr>`).join(""),
+    `<tr><td>${hms(m.ts)}</td><td>${m.central}</td><td${m.account==="?"?' title="Аккаунт в письме не определился"':""}>${esc(m.account)}</td><td>${KD[m.kind]||esc(m.kind)}</td><td>${m.code?`<button class="code" data-copy="${esc(m.code)}" title="Нажмите, чтобы скопировать">${esc(m.code)}</button>`:m.has_link?lnk(m.link):""}</td><td>${esc(m.used_by||"—")}</td><td class="sbj" title="${esc(m.subject)}">${esc(m.subject)}</td></tr>`).join(""),
     "Писем от BLS пока не было.");
 
   // ящики

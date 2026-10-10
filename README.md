@@ -11,7 +11,13 @@
 | `application` (алиас `form`) | BLS Visa Appointment - Email Verification | `code` |
 | `password` | Welcome To BLS Appointment System | `code` (временный пароль) |
 | `consent` (алиас `link`) | BLS - Data Protection Information | `link` (кнопка согласия `...dataprotectionemailaccept?data=...`) |
-| `any` | любое письмо с кодом, кроме `password` и `consent` | `code` |
+| `activation` (алиас `activate`) | VFS Global: тема `Welcome`, в теле ссылка `.../activateemail?q=...` | `link` (ссылка активации аккаунта) |
+| `any` | любое письмо с кодом, кроме `password`, `consent` и `activation` | `code` |
+
+## Отправители
+По умолчанию читаются письма от `info@blsspainrussia.ru` (BLS) и `donotreply@vfsglobal.com` (VFS Global).
+Список меняется переменной `SENDERS=a@x.com,b@y.com`. Ссылка активации ищется по фрагменту `activateemail`
+(`ACTIVATION_LINK_KEY`). Ссылка VFS действует 2 дня.
 
 ## API (заголовок `X-API-Key: <API_KEY>`)
 
@@ -43,6 +49,9 @@ requests.post(f"{URL}/api/tasks/{tid}/ack", headers=H)
    ровно одно подходящее ожидающее задание. Иначе письмо видно на дашборде со знаком `?`.
 
 ## Дашборд
+Метка «ссылка ↗» в заданиях и письмах кликабельна: открывает ссылку активации/согласия в новой вкладке.
+Ссылка одноразовая, открывайте её один раз. Она видна только после входа по Basic Auth.
+
 `GET /` — логин/пароль `DASH_USER` / `DASH_PASS` (Basic Auth).
 
 Вёрстка лежит в `static/dashboard.html` (правится как обычный HTML), логотип и значки — в `static/`

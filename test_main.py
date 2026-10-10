@@ -50,9 +50,9 @@ DECLINE = ACCEPT.replace("accept", "decline")
 _uid = [0]
 
 
-def feed(subject, body, to="f_a02@mail.ru", html=None):
+def feed(subject, body, to="f_a02@mail.ru", html=None, sender="BLS <info@blsspainrussia.ru>"):
     m = EmailMessage()
-    m["From"], m["To"], m["Subject"], m["Date"] = "BLS <info@blsspainrussia.ru>", to, subject, formatdate()
+    m["From"], m["To"], m["Subject"], m["Date"] = sender, to, subject, formatdate()
     m.set_content(body)
     if html:
         m.add_alternative(html, subtype="html")
@@ -121,6 +121,42 @@ def test_ack_wipes_result():
     assert main.get_task(t)["code"] == "515151"
     main.ack_task(t)
     assert main.get_task(t)["code"] is None
+
+
+VFS_LINK = ("https://visa.vfsglobal.com/rus/en/fra/activateemail?q=yCjN0ZQuH8jGldhYH+wSEBYgJGL01ltK9VvZ"
+            "+mVebW+kXDsI/odxNeAMC+nJeDeMgJwv4YEtu6BBPbZSfxIzpdUMxoBW072xlhP3EGBZgpioFpSF/OYK0aHcv")
+VFS_HTML = (f'<p>Dear Applicant,</p><p>Your account has been successfully created with the credentials '
+            f'entered by you.</p><p>Please click on below link to activate your account.</p>'
+            f'<a href="{VFS_LINK}">ActivateAccount</a><p>If the link is not working, copy below link</p>'
+            f'<a href="{VFS_LINK}">{VFS_LINK}</a>')
+VFS = "Welcome <donotreply@vfsglobal.com>"
+
+
+def test_vfs_activation_link():
+    t = task("f_a03@mail.ru", "activation")
+    feed("Welcome", "Dear Applicant, activate your account", to="f_a03@mail.ru", html=VFS_HTML, sender=VFS)
+    r = main.get_task(t)
+    # не должно стать "password", хотя в письме есть "account has been successfully created"
+    assert r["status"] == "delivered" and r["link"] == VFS_LINK and r["type"] == "activation", r
+    assert r["code"] is None, r
+
+
+def test_vfs_activation_alias_and_loose_match():
+    t = task("f_a02@mail.ru", "activate")
+    feed("Welcome", "x", to="central@mail.ru", html=VFS_HTML, sender=VFS)
+    assert main.get_task(t)["link"] == VFS_LINK
+
+
+def test_any_ignores_activation():
+    t = task("f_a03@mail.ru", "any")
+    feed("Welcome", "x", to="f_a03@mail.ru", html=VFS_HTML, sender=VFS)
+    assert main.get_task(t)["status"] == "waiting"
+
+
+def test_unknown_sender_ignored():
+    n = len(main.MAILS)
+    feed("Welcome", "x", html=VFS_HTML, sender="Evil <x@evil.com>")
+    assert len(main.MAILS) == n
 
 
 if __name__ == "__main__":

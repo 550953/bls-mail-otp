@@ -41,7 +41,11 @@ def csv(k, d):
 API_KEY = env("API_KEY")
 DASH_USER, DASH_PASS = env("DASH_USER"), env("DASH_PASS")
 IMAP_SERVER = env("IMAP_SERVER", "imap.mail.ru")
-SENDER = env("BLS_SENDER", "info@blsspainrussia.ru").lower()
+# Отправители писем: BLS и VFS Global. Можно переопределить: SENDERS=a@x.com,b@y.com
+# (старая переменная BLS_SENDER тоже работает и добавляется в список)
+SENDERS = csv("SENDERS", "info@blsspainrussia.ru,donotreply@vfsglobal.com")
+if env("BLS_SENDER") and env("BLS_SENDER").lower() not in SENDERS:
+    SENDERS.append(env("BLS_SENDER").lower())
 POLL = int(env("POLL_SECONDS", "5"))
 TASK_TTL = int(env("TASK_TTL_SECONDS", "300"))      # задание протухает
 CLAIM_TTL = int(env("CLAIM_TTL_SECONDS", "300"))    # код пришёл, а браузер не забрал
@@ -52,15 +56,20 @@ MAX_MAIL_AGE = int(env("MAX_MAIL_AGE_SECONDS", "900"))
 #   "BLS Visa Appointment - Email Verification" -> код при заполнении анкеты
 #   "Welcome To BLS Appointment System"         -> временный пароль
 #   "BLS - Data Protection Information"         -> ссылка согласия (consent)
+#   VFS Global: тема "Welcome", в теле ссылка .../activateemail?q=...  -> ссылка активации (activation)
 KW_REG = csv("KW_REGISTRATION", "user verification,registration,регистрац")
 KW_APP = csv("KW_APPLICATION", "email verification,application,анкет")
 KW_CONSENT = csv("KW_CONSENT", "data protection,защита данных")
 # ссылка согласия определяется по этому фрагменту URL
 CONSENT_LINK_KEY = env("CONSENT_LINK_KEY", "dataprotectionemailaccept").lower()
+# ссылка активации аккаунта (VFS Global) определяется по этому фрагменту URL
+ACTIVATION_LINK_KEY = env("ACTIVATION_LINK_KEY", "activateemail").lower()
 MAX_ACTIVE = int(env("MAX_ACTIVE_TASKS", "2000"))
 
-KINDS = ("registration", "application", "password", "consent")
-ALIASES = {"form": "application", "link": "consent", "data_protection": "consent"}
+KINDS = ("registration", "application", "password", "consent", "activation")
+LINK_KINDS = ("consent", "activation")   # эти письма отдают link, а не code
+ALIASES = {"form": "application", "link": "consent", "data_protection": "consent",
+           "activate": "activation", "activate_account": "activation"}
 EMAIL_RE = re.compile(r"[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}")
 STOP = threading.Event()
 LOCK = threading.RLock()
@@ -138,19 +147,28 @@ def find_code(text):
 
 
 def find_link(links):
-    return next((u for u in links if CONSENT_LINK_KEY in u.lower()), "")
+    """Первая ссылка согласия (BLS) или активации (VFS). Возвращает (ссылка, вид)."""
+    for u in links:
+        if ACTIVATION_LINK_KEY in u.lower():
+            return u, "activation"
+    for u in links:
+        if CONSENT_LINK_KEY in u.lower():
+            return u, "consent"
+    return "", ""
 
 
 DEAR_RE = re.compile(r"Dear\s+([\w.+-]+@[\w.-]+\.[A-Za-z]{2,})", re.I)
 
 
-def classify(subject, body, link=""):
+def classify(subject, body, link="", link_kind=""):
     s, b = subject.lower(), body.lower()
+    if link_kind == "activation":   # раньше "password": фраза "account has been successfully created" есть и тут
+        return "activation"
     if (re.search(r"welcome to (the )?bls appointment system", s)
             or "please use below password" in b
             or "your account has been successfully created" in b):
         return "password"
-    if link or any(k in s for k in KW_CONSENT):
+    if link_kind == "consent" or any(k in s for k in KW_CONSENT):
         return "consent"
     if any(k in s for k in KW_REG):
         return "registration"
@@ -173,8 +191,8 @@ def fits(t, m, loose=False):
         return False
     k = m["kind"]
     return (t["type"] == k
-            or (t["type"] == "any" and k not in ("password", "consent"))
-            or (k == "unknown" and t["type"] not in ("password", "consent")))
+            or (t["type"] == "any" and k not in ("password",) + LINK_KINDS)
+            or (k == "unknown" and t["type"] not in ("password",) + LINK_KINDS))
 
 
 def assign(t, m):
@@ -287,10 +305,11 @@ class Central:
         if self.last_uid is None:  # первый заход: старое не трогаем, берём только свежие
             self.last_uid = max(self.search("ALL"), default=0)
             since = (datetime.now(timezone.utc) - timedelta(days=1)).strftime("%d-%b-%Y")
-            uids = self.search("FROM", SENDER, "SINCE", since)
+            uids = sorted({u for s in SENDERS for u in self.search("FROM", s, "SINCE", since)})
         else:
-            uids = [u for u in self.search("UID", f"{self.last_uid + 1}:*", "FROM", SENDER)
-                    if u > self.last_uid]
+            uids = sorted({u for s in SENDERS
+                           for u in self.search("UID", f"{self.last_uid + 1}:*", "FROM", s)
+                           if u > self.last_uid})
             allnew = self.search("UID", f"{self.last_uid + 1}:*")
             self.last_uid = max([self.last_uid] + [u for u in allnew if u > self.last_uid])
         for u in sorted(uids):
@@ -316,7 +335,7 @@ class Central:
     def handle(self, raw, uid):
         msg = email.message_from_bytes(raw)
         m = EMAIL_RE.search(str(msg.get("From", "")))
-        if not m or m.group(0).lower() != SENDER:
+        if not m or m.group(0).lower() not in SENDERS:
             return
         try:
             d = parsedate_to_datetime(msg.get("Date"))
@@ -327,14 +346,14 @@ class Central:
             return
         subject = dec(msg.get("Subject", ""))
         body, links = parse_body(msg)
-        link = find_link(links)
-        kind = classify(subject, body, link)
-        code = "" if kind == "consent" else find_code(subject + " " + body)
+        link, link_kind = find_link(links)
+        kind = classify(subject, body, link, link_kind)
+        code = "" if kind in LINK_KINDS else find_code(subject + " " + body)
         if not (code or link):
             return
         self.mails += 1
         ingest({"id": f"{self.n}:{uid}", "central": self.n, "account": self.detect(msg, body),
-                "code": code, "link": link if kind == "consent" else "", "kind": kind,
+                "code": code, "link": link if kind in LINK_KINDS else "", "kind": kind,
                 "subject": subject[:80], "ts": d.timestamp(), "used_by": None})
 
 
@@ -393,7 +412,7 @@ def require_dash(cred: Optional[HTTPBasicCredentials] = Depends(basic)):
 
 class TaskIn(BaseModel):
     email: str
-    type: str = "any"   # registration | application | password | any
+    type: str = "any"   # registration | application | password | consent | activation | any
 
 
 @app.get("/health")
@@ -480,11 +499,11 @@ def dash_state():
                           "error": c.error, "poll_age": (now - c.last_ok) if c.last_ok else None,
                           "mails": c.mails} for c in CENTRALS],
             "tasks": [{"id": t["id"], "email": t["email"], "type": t["kind"] or t["type"],
-                       "status": t["status"], "code": t["code"], "has_link": bool(t["link"]),
+                       "status": t["status"], "code": t["code"], "has_link": bool(t["link"]), "link": t["link"],
                        "age": now - t["created"]}
                       for t in tasks[:100]],
             "mails": [{"ts": m["ts"], "central": m["central"], "account": m["account"] or "?",
-                       "kind": m["kind"], "code": m["code"], "has_link": bool(m["link"]),
+                       "kind": m["kind"], "code": m["code"], "has_link": bool(m["link"]), "link": m["link"],
                        "used_by": m["used_by"],
                        "subject": m["subject"]} for m in list(MAILS)[:50]],
         }
