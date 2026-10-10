@@ -157,6 +157,12 @@ a.code{text-decoration:none;display:inline-block}
 .stack{display:flex;flex-direction:column;gap:16px}
 h3{font-size:14px;font-weight:800;margin:0 0 6px}
 
+.tools{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.tools select{font:600 13px inherit;font-family:inherit;border:1px solid var(--line,#e3e8f2);border-radius:10px;padding:8px 10px;background:#fff;color:var(--ink);height:38px}
+td .sub{display:block;font-size:11.5px;color:#7a869c;margin-top:2px}
+td .fld{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12.5px}
+.act{display:flex;gap:6px;flex-wrap:wrap}
+button.code.link{border:0;cursor:pointer}
 .toast{position:fixed;left:50%;bottom:22px;transform:translateX(-50%);background:var(--ink);color:#fff;padding:9px 16px;border-radius:10px;font-weight:600;font-size:13px;opacity:0;pointer-events:none;transition:opacity .15s}
 .toast.show{opacity:1}
 
@@ -233,7 +239,12 @@ h3{font-size:14px;font-weight:800;margin:0 0 6px}
       </div>
 
       <section class="card s12" id="mails" aria-labelledby="h-mails">
-        <div class="head"><h2 id="h-mails">Последние письма с кодами</h2></div>
+        <div class="head"><h2 id="h-mails">Последние письма</h2>
+          <div class="tools">
+            <select id="qk" aria-label="Тип письма"><option value="">Все типы</option><option value="activation">Активация</option><option value="registration">Регистрация</option><option value="application">Анкета</option><option value="password">Пароль</option><option value="consent">Согласие</option></select>
+            <label class="q"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/></svg><input id="qm" type="search" placeholder="Аккаунт, ящик, папка, тема" aria-label="Поиск по письмам"></label>
+          </div>
+        </div>
         <div class="wrap" id="mailtbl"></div>
       </section>
 
@@ -279,6 +290,11 @@ const CS={online:["Онлайн","ok"],error:["Ошибка","bad"],idle:["За�
 
 // ссылка активации/согласия: клик открывает её в новой вкладке (ссылка одноразовая — открывать один раз)
 const lnk=u=>/^https:\/\//.test(u||"")?`<a class="code link" href="${esc(u)}" target="_blank" rel="noopener noreferrer" title="Открыть ссылку в новой вкладке">ссылка ↗</a>`:`<span class="code link" style="cursor:default">ссылка</span>`;
+const short=l=>(l||"").split("@")[0];
+const cen=(n,l)=>`<span title="${esc(l)}">${n} · ${esc(short(l))}</span>`;
+const fldCell=f=>!f?"—":f.toUpperCase()==="INBOX"?`<span class="fld" title="Входящие">Входящие</span>`:`<span class="fld" title="Папка ${esc(f)}">${esc(f)}</span>`;
+const res=o=>o.code?`<button class="code" data-copy="${esc(o.code)}" data-what="Код" title="Нажмите, чтобы скопировать">${esc(o.code)}</button>`
+  :o.has_link?`<div class="act">${lnk(o.link)}${o.link?`<button class="code link" data-copy="${esc(o.link)}" data-what="Ссылка" title="Скопировать ссылку">копировать</button>`:""}</div>`:"";
 const tag=s=>{const[a,b]=ST[s]||[s,"w"];return `<span class="tag ${b}">${a}</span>`};
 const tbl=(h,rows,empty)=>`<table><thead><tr>${h.map(x=>`<th scope="col">${x}</th>`).join("")}</tr></thead><tbody>${rows||`<tr><td class="empty" colspan="${h.length}">${empty}</td></tr>`}</tbody></table>`;
 
@@ -351,20 +367,24 @@ function render(s){
   // задания
   const q=$("#q").value.trim().toLowerCase();
   const tasks=s.tasks.filter(t=>!q||t.email.includes(q)||t.id.includes(q));
-  $("#tasktbl").innerHTML=tbl(["ID","Аккаунт","Тип","Статус","Код","Возраст"],tasks.map(t=>{
-    const res=t.code?`<button class="code" data-copy="${esc(t.code)}" title="Нажмите, чтобы скопировать">${esc(t.code)}</button>`:t.has_link?lnk(t.link):"";
-    return `<tr><td>${esc(t.id)}</td><td>${esc(t.email)}</td><td>${KD[t.type]||esc(t.type)}</td><td>${tag(t.status)}</td><td>${res}</td><td>${age(t.age)}</td></tr>`}).join(""),
+  $("#tasktbl").innerHTML=tbl(["ID","Аккаунт","Централ","Тип","Статус","Результат","Возраст"],tasks.map(t=>
+    `<tr><td>${esc(t.id)}</td><td>${esc(t.email)}</td><td>${cen(t.central,t.login)}</td><td>${KD[t.type]||esc(t.type)}</td><td>${tag(t.status)}</td><td>${res(t)}</td><td>${age(t.age)}</td></tr>`).join(""),
     q?"Ничего не найдено":"Заданий пока нет. Они появятся, когда клиент вызовет POST /api/tasks.");
 
   // письма
-  $("#mailtbl").innerHTML=tbl(["Время","Ящик","Аккаунт","Тип","Код","Задание","Тема"],s.mails.map(m=>
-    `<tr><td>${hms(m.ts)}</td><td>${m.central}</td><td${m.account==="?"?' title="Аккаунт в письме не определился"':""}>${esc(m.account)}</td><td>${KD[m.kind]||esc(m.kind)}</td><td>${m.code?`<button class="code" data-copy="${esc(m.code)}" title="Нажмите, чтобы скопировать">${esc(m.code)}</button>`:m.has_link?lnk(m.link):""}</td><td>${esc(m.used_by||"—")}</td><td class="sbj" title="${esc(m.subject)}">${esc(m.subject)}</td></tr>`).join(""),
-    "Писем от BLS пока не было.");
+  const qm=$("#qm").value.trim().toLowerCase(),qk=$("#qk").value;
+  const mails=s.mails.filter(m=>(!qk||m.kind===qk)&&(!qm||[m.account,m.login,m.folder,m.subject,(m.to||[]).join(" ")].join(" ").toLowerCase().includes(qm)));
+  $("#mailtbl").innerHTML=tbl(["Время","Централ","Папка","Аккаунт","Тип","Результат","Задание","Тема"],mails.map(m=>{
+    const to=(m.to||[]).filter(a=>a!==m.account);
+    return `<tr><td>${hms(m.ts)}</td><td>${cen(m.central,m.login)}</td><td>${fldCell(m.folder)}</td>`+
+    `<td${m.account==="?"?' title="Аккаунт в письме не определился"':""}>${esc(m.account)}${to.length?`<span class="sub" title="Адреса в заголовках письма">в письме: ${esc(to.join(", "))}</span>`:""}</td>`+
+    `<td>${KD[m.kind]||esc(m.kind)}</td><td>${res(m)}</td><td>${esc(m.used_by||"—")}</td><td class="sbj" title="${esc(m.subject)}">${esc(m.subject)}</td></tr>`}).join(""),
+    qm||qk?"Ничего не найдено":"Писем пока не было.");
 
   // ящики
-  $("#centbl").innerHTML=tbl(["№","Ящик","Аккаунтов","Статус","Последний опрос","Писем BLS","Ошибка"],C.map(c=>{
+  $("#centbl").innerHTML=tbl(["№","Ящик","Аккаунтов","Папки","Статус","Последний опрос","Писем","Ошибка"],C.map(c=>{
     const[a,b]=CS[c.status]||[c.status,"warn"];
-    return `<tr><td>${c.n}</td><td>${esc(c.login)}</td><td>${c.subs}</td><td><span class="dot ${b}" style="margin-right:7px"></span>${a}</td><td>${c.poll_age==null?"—":age(c.poll_age)+" назад"}</td><td>${c.mails}</td><td class="err" title="${esc(c.error)}">${esc(c.error)}</td></tr>`}).join(""),
+    return `<tr><td>${c.n}</td><td>${esc(c.login)}</td><td>${c.subs}</td><td title="${esc((c.folders||[]).join(', '))}">${(c.folders||[]).length}<span class="sub">${esc((c.folders||[]).filter(f=>f.toUpperCase()!=="INBOX").slice(0,2).map(short).join(", "))}${(c.folders||[]).length>3?"…":""}</span></td><td><span class="dot ${b}" style="margin-right:7px"></span>${a}</td><td>${c.poll_age==null?"—":age(c.poll_age)+" назад"}</td><td>${c.mails}</td><td class="err" title="${esc(c.error)}">${esc(c.error)}</td></tr>`}).join(""),
     "Центральные ящики не настроены: добавьте переменные CENTRAL_1, CENTRAL_1_PASS и т. д.");
 
   // состояние
@@ -388,10 +408,12 @@ function render(s){
 let tt;
 document.addEventListener("click",e=>{
   const b=e.target.closest("[data-copy]");if(!b)return;
-  const v=b.dataset.copy,done=()=>{const t=$("#toast");t.textContent="Код "+v+" скопирован";t.classList.add("show");clearTimeout(tt);tt=setTimeout(()=>t.classList.remove("show"),1600)};
+  const v=b.dataset.copy,done=()=>{const t=$("#toast");t.textContent=(b.dataset.what||"Код")+(b.dataset.what==="Ссылка"?" скопирована":" "+v+" скопирован");t.classList.add("show");clearTimeout(tt);tt=setTimeout(()=>t.classList.remove("show"),1600)};
   (navigator.clipboard?navigator.clipboard.writeText(v):Promise.reject()).then(done,()=>{const a=document.createElement("textarea");a.value=v;document.body.appendChild(a);a.select();try{document.execCommand("copy");done()}catch(_){}a.remove()});
 });
 $("#q").addEventListener("input",()=>last&&render(last));
+$("#qm").addEventListener("input",()=>last&&render(last));
+$("#qk").addEventListener("change",()=>last&&render(last));
 
 // меню: свёрнуто по умолчанию, выбор запоминается в браузере
 const app=document.querySelector(".app"),fold=$("#fold");

@@ -207,6 +207,36 @@ def test_list_folders_picks_collector_folders():
     C.conn = None
 
 
+def test_unknown_folder_becomes_account_and_mail_has_folder():
+    n = len(main.MAILS)
+    m = EmailMessage()
+    m["From"], m["To"], m["Subject"], m["Date"] = VFS, "central@mail.ru", "Welcome", formatdate()
+    m.set_content("x")
+    m.add_alternative(VFS_HTML, subtype="html")
+    C.handle(m.as_bytes(), 901, "newbie_a11@mail.ru")
+    mail = main.MAILS[0]
+    assert len(main.MAILS) == n + 1 and mail["account"] == "newbie_a11@mail.ru", mail
+    assert mail["folder"] == "newbie_a11@mail.ru" and "newbie_a11@mail.ru" in main.ACCOUNTS
+    t = task("newbie_a11@mail.ru", "activation")   # аккаунт стал известен: задание создаётся и сразу получает ссылку
+    assert main.get_task(t)["link"] == VFS_LINK
+
+
+def test_recipient_header_not_in_settings_is_learned():
+    m = EmailMessage()
+    m["From"], m["To"], m["Delivered-To"], m["Subject"], m["Date"] = VFS, "zzz_a12@mail.ru", "central@mail.ru", "Welcome", formatdate()
+    m.set_content("x")
+    m.add_alternative(VFS_HTML, subtype="html")
+    C.handle(m.as_bytes(), 902, "INBOX")
+    assert main.MAILS[0]["account"] == "zzz_a12@mail.ru" and main.MAILS[0]["folder"] == "INBOX", main.MAILS[0]
+
+
+def test_dash_state_has_folder_and_central():
+    main.API_KEY = "k"
+    st = main.dash_state()
+    assert {"folder", "login", "to"} <= set(st["mails"][0]), st["mails"][0]
+    assert "folders" in st["centrals"][0]
+
+
 if __name__ == "__main__":
     for name, fn in list(globals().items()):
         if name.startswith("test_"):

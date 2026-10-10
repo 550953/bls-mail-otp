@@ -362,12 +362,29 @@ class Central:
             if raw:
                 self.handle(raw, u, folder)
 
-    def detect(self, msg, body="", folder=""):
+    RCPT_HEADERS = ("Delivered-To", "X-Original-To", "X-Forwarded-To", "Resent-To",
+                    "Envelope-To", "X-Envelope-To", "Original-Recipient", "To", "Cc")
+
+    def recipients(self, msg):
+        """Адреса получателей из заголовков (без дублей, по порядку)."""
         found = []
-        for h in ("Delivered-To", "X-Original-To", "X-Forwarded-To", "Resent-To",
-                  "Envelope-To", "X-Envelope-To", "Original-Recipient", "To", "Cc"):
+        for h in self.RCPT_HEADERS:
             for v in msg.get_all(h, []):
                 found += [a.lower() for a in EMAIL_RE.findall(str(v))]
+        return list(dict.fromkeys(found))
+
+    def learn(self, addr):
+        """Аккаунт не из настроек, но письмо пришло в этот централ: запоминаем его (чтобы работали задания)."""
+        with LOCK:
+            if addr and addr != self.login and addr not in SENDERS and addr not in ACCOUNTS:
+                ACCOUNTS.add(addr)
+                ACCOUNT_CENTRAL[addr] = self.n
+                self.subs.append(addr)
+                log.info("central %s: новый аккаунт из письма: %s", self.n, addr)
+        return addr
+
+    def detect(self, msg, body="", folder=""):
+        found = self.recipients(msg)
         for a in found:
             if a in self.subs:
                 return a
@@ -376,6 +393,11 @@ class Central:
             return d.group(1).lower()
         if folder.lower() in self.subs:   # письмо лежит в папке сборщика этого ящика
             return folder.lower()
+        if "@" in folder and folder.lower() != self.login:   # папка сборщика, ящика нет в настройках
+            return self.learn(folder.lower())
+        others = [a for a in found if a != self.login and a not in SENDERS]
+        if others:                         # в заголовках адрес, которого нет в настройках
+            return self.learn(others[0])
         return self.login if self.login in found else ""
 
     def handle(self, raw, uid, folder="INBOX"):
@@ -401,7 +423,8 @@ class Central:
         if not (code or link):
             return
         self.mails += 1
-        ingest({"id": f"{self.n}:{folder}:{uid}", "central": self.n, "account": self.detect(msg, body, folder),
+        ingest({"id": f"{self.n}:{folder}:{uid}", "central": self.n, "folder": folder,
+                "to": self.recipients(msg)[:3], "account": self.detect(msg, body, folder),
                 "code": code, "link": link if kind in LINK_KINDS else "", "kind": kind,
                 "subject": subject[:80], "ts": d.timestamp(), "used_by": None})
 
@@ -555,15 +578,17 @@ def dash_state():
             "events": list(EVENTS)[:30],
             "centrals": [{"n": c.n, "login": c.login, "subs": len(c.subs), "status": c.status,
                           "error": c.error, "poll_age": (now - c.last_ok) if c.last_ok else None,
-                          "mails": c.mails} for c in CENTRALS],
+                          "mails": c.mails, "folders": list(c.folders)} for c in CENTRALS],
             "tasks": [{"id": t["id"], "email": t["email"], "type": t["kind"] or t["type"],
                        "status": t["status"], "code": t["code"], "has_link": bool(t["link"]), "link": t["link"],
+                       "central": t["central"], "login": CENTRAL_LOGINS.get(t["central"], ""),
                        "age": now - t["created"]}
                       for t in tasks[:100]],
-            "mails": [{"ts": m["ts"], "central": m["central"], "account": m["account"] or "?",
+            "mails": [{"ts": m["ts"], "central": m["central"], "login": CENTRAL_LOGINS.get(m["central"], ""),
+                       "folder": m.get("folder", ""), "to": m.get("to", []), "account": m["account"] or "?",
                        "kind": m["kind"], "code": m["code"], "has_link": bool(m["link"]), "link": m["link"],
                        "used_by": m["used_by"],
-                       "subject": m["subject"]} for m in list(MAILS)[:50]],
+                       "subject": m["subject"]} for m in list(MAILS)[:80]],
         }
 
 
