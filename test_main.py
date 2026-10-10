@@ -1,6 +1,7 @@
 """Офлайн-тест разбора писем BLS и выдачи кодов. Запуск: python test_main.py"""
 import os
 import sys
+import time
 import types
 from email.message import EmailMessage
 from email.utils import formatdate
@@ -50,9 +51,9 @@ DECLINE = ACCEPT.replace("accept", "decline")
 _uid = [0]
 
 
-def feed(subject, body, to="f_a02@mail.ru", html=None, sender="BLS <info@blsspainrussia.ru>"):
+def feed(subject, body, to="f_a02@mail.ru", html=None, sender="BLS <info@blsspainrussia.ru>", ago=0):
     m = EmailMessage()
-    m["From"], m["To"], m["Subject"], m["Date"] = sender, to, subject, formatdate()
+    m["From"], m["To"], m["Subject"], m["Date"] = sender, to, subject, formatdate(time.time() - ago)
     m.set_content(body)
     if html:
         m.add_alternative(html, subtype="html")
@@ -157,6 +158,27 @@ def test_unknown_sender_ignored():
     n = len(main.MAILS)
     feed("Welcome", "x", html=VFS_HTML, sender="Evil <x@evil.com>")
     assert len(main.MAILS) == n
+
+
+def test_old_activation_is_read_and_matched_to_later_task():
+    # письмо пришло 8 часов назад, задания ещё не было (сервис перезапускали)
+    feed("Welcome", "x", to="f_a02@mail.ru", html=VFS_HTML, sender=VFS, ago=8 * 3600)
+    t = task("f_a02@mail.ru", "activation")
+    r = main.get_task(t)
+    assert r["status"] == "delivered" and r["link"] == VFS_LINK, r
+
+
+def test_old_otp_code_is_dropped_but_old_activation_older_than_ttl_too():
+    n = len(main.MAILS)
+    feed("BLS Visa Appointment - Email Verification", "Your verification code is 123456", ago=3600)
+    feed("Welcome", "x", html=VFS_HTML, sender=VFS, ago=3 * 86400)
+    assert len(main.MAILS) == n
+
+
+def test_rescan_resets_cursor():
+    C.last_uid = 5
+    C.rescan()
+    assert C.last_uid is None
 
 
 if __name__ == "__main__":

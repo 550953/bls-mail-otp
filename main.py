@@ -51,6 +51,10 @@ TASK_TTL = int(env("TASK_TTL_SECONDS", "300"))      # задание проту�
 CLAIM_TTL = int(env("CLAIM_TTL_SECONDS", "300"))    # код пришёл, а браузер не забрал
 GRACE = int(env("MATCH_GRACE_SECONDS", "30"))       # письмо могло прийти чуть раньше задания
 MAX_MAIL_AGE = int(env("MAX_MAIL_AGE_SECONDS", "900"))
+# Ссылки активации живут ~2 суток: такие письма читаем «задним числом» и держим для будущих заданий
+ACTIVATION_MAX_AGE = int(env("ACTIVATION_MAX_AGE_SECONDS", "172800"))
+# На старте (и при /api/rescan) дочитываем ящики за столько часов назад
+BACKFILL_HOURS = int(env("BACKFILL_HOURS", "48"))
 # Темы писем BLS (по реальным письмам):
 #   "BLS Visa Appointment - User Verification"  -> код при регистрации
 #   "BLS Visa Appointment - Email Verification" -> код при заполнении анкеты
@@ -74,7 +78,7 @@ EMAIL_RE = re.compile(r"[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}")
 STOP = threading.Event()
 LOCK = threading.RLock()
 TASKS: dict = {}
-MAILS: deque = deque(maxlen=300)
+MAILS: deque = deque(maxlen=1500)
 SEEN: dict = {}
 START = time.time()
 EVENTS: deque = deque(maxlen=80)    # лента событий для дашборда (только в памяти)
@@ -187,8 +191,8 @@ def fits(t, m, loose=False):
             return False
     elif t["email"] != m["account"]:
         return False
-    if m["ts"] < t["created"] - GRACE:
-        return False
+    if m["kind"] != "activation" and m["ts"] < t["created"] - GRACE:
+        return False   # у ссылки активации срок жизни сутки+, письмо могло прийти до задания
     k = m["kind"]
     return (t["type"] == k
             or (t["type"] == "any" and k not in ("password",) + LINK_KINDS)
@@ -238,7 +242,7 @@ def sweep():
                 event("not_collected", t["email"])
         for k in [k for k, t in TASKS.items() if now - t["created"] > 3 * 3600]:
             del TASKS[k]
-        for k in [k for k, v in SEEN.items() if now - v > 7200]:
+        for k in [k for k, v in SEEN.items() if now - v > ACTIVATION_MAX_AGE + 3600]:
             del SEEN[k]
         for k in [k for k in HOURLY if k < now // 3600 - 26]:
             del HOURLY[k]
@@ -258,6 +262,10 @@ class Central:
         self.last_uid = None
         self.status, self.error, self.last_ok = "idle", "", 0.0
         self.fails, self.mails = 0, 0
+
+    def rescan(self):
+        """Заново прочитать окно BACKFILL_HOURS (уже учтённые письма пропускаются по SEEN)."""
+        self.last_uid = None
 
     def start(self):
         threading.Thread(target=self.loop, name=f"central-{self.n}", daemon=True).start()
@@ -302,9 +310,10 @@ class Central:
         c = self.conn
         if c.select("INBOX", readonly=True)[0] != "OK":
             raise RuntimeError("IMAP select failed")
-        if self.last_uid is None:  # первый заход: старое не трогаем, берём только свежие
+        if self.last_uid is None:  # первый заход / rescan: дочитываем письма за BACKFILL_HOURS
             self.last_uid = max(self.search("ALL"), default=0)
-            since = (datetime.now(timezone.utc) - timedelta(days=1)).strftime("%d-%b-%Y")
+            # SINCE работает по датам, берём с запасом в сутки; точный возраст проверяет handle()
+            since = (datetime.now(timezone.utc) - timedelta(hours=BACKFILL_HOURS + 24)).strftime("%d-%b-%Y")
             uids = sorted({u for s in SENDERS for u in self.search("FROM", s, "SINCE", since)})
         else:
             uids = sorted({u for s in SENDERS
@@ -342,12 +351,15 @@ class Central:
             d = d if d.tzinfo else d.replace(tzinfo=timezone.utc)
         except Exception:
             d = datetime.now(timezone.utc)
-        if (datetime.now(timezone.utc) - d).total_seconds() > MAX_MAIL_AGE:
+        age = (datetime.now(timezone.utc) - d).total_seconds()
+        if age > ACTIVATION_MAX_AGE:
             return
         subject = dec(msg.get("Subject", ""))
         body, links = parse_body(msg)
         link, link_kind = find_link(links)
         kind = classify(subject, body, link, link_kind)
+        if age > MAX_MAIL_AGE and kind != "activation":
+            return   # старые коды бесполезны, дочитываем только ссылки активации
         code = "" if kind in LINK_KINDS else find_code(subject + " " + body)
         if not (code or link):
             return
@@ -477,6 +489,15 @@ def ack_task(tid: str):
         else:
             raise HTTPException(410, f"task is {t['status']}")
         return {"task_id": tid, "status": "delivered", "acked": True}
+
+
+@app.post("/api/rescan", dependencies=[Depends(require_key)])
+def rescan():
+    """Заставить все централы заново дочитать письма за BACKFILL_HOURS."""
+    for c in CENTRALS:
+        c.rescan()
+    event("rescan", "", f"{BACKFILL_HOURS} ч")
+    return {"ok": True, "centrals": len(CENTRALS), "hours": BACKFILL_HOURS}
 
 
 @app.get("/dash/state", dependencies=[Depends(require_dash)])
