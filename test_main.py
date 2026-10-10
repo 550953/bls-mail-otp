@@ -176,9 +176,35 @@ def test_old_otp_code_is_dropped_but_old_activation_older_than_ttl_too():
 
 
 def test_rescan_resets_cursor():
-    C.last_uid = 5
+    C.cursor = {"INBOX": 5, "f_a02@mail.ru": 9}
     C.rescan()
-    assert C.last_uid is None
+    assert C.cursor == {}
+
+
+def test_account_from_collector_folder():
+    # письмо сборщика: в To адрес централа, "Dear Applicant" без адреса; аккаунт определяем по папке
+    t = task("f_a03@mail.ru", "activation")
+    m = EmailMessage()
+    m["From"], m["To"], m["Subject"], m["Date"] = VFS, "central@mail.ru", "Welcome", formatdate()
+    m.set_content("Dear Applicant")
+    m.add_alternative(VFS_HTML, subtype="html")
+    C.handle(m.as_bytes(), 777, "f_a03@mail.ru")
+    r = main.get_task(t)
+    assert r["status"] == "delivered" and r["link"] == VFS_LINK, r
+
+
+class FakeConn:
+    def list(self):
+        return "OK", [b'(\\HasNoChildren) "/" "INBOX"', b'(\\HasNoChildren) "/" "f_a02@mail.ru"',
+                      b'(\\HasNoChildren) "/" "Sent"', b'(\\HasNoChildren) "/" f_a03@mail.ru',
+                      b'(\\HasNoChildren) "/" "&BCEEPwQwBDw-"']
+
+
+def test_list_folders_picks_collector_folders():
+    C.conn, C.folders_at = FakeConn(), 0.0
+    f = C.list_folders()
+    assert f == ["INBOX", "f_a02@mail.ru", "f_a03@mail.ru"], f
+    C.conn = None
 
 
 if __name__ == "__main__":

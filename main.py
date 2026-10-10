@@ -55,6 +55,11 @@ MAX_MAIL_AGE = int(env("MAX_MAIL_AGE_SECONDS", "900"))
 ACTIVATION_MAX_AGE = int(env("ACTIVATION_MAX_AGE_SECONDS", "172800"))
 # На старте (и при /api/rescan) дочитываем ящики за столько часов назад
 BACKFILL_HOURS = int(env("BACKFILL_HOURS", "48"))
+# Какие папки читать. Письма сборщика Mail.ru лежат в папках с именем ящика (bistrova_a02@mail.ru),
+# а не во «Входящих». По умолчанию: INBOX + все папки, в имени которых есть "@".
+# Можно задать явно: IMAP_FOLDERS=INBOX,bistrova_a02@mail.ru (имена как в IMAP, регистр важен)
+EXTRA_FOLDERS = [x.strip() for x in env("IMAP_FOLDERS").split(",") if x.strip()]
+FOLDER_REFRESH = int(env("FOLDER_REFRESH_SECONDS", "300"))
 # Темы писем BLS (по реальным письмам):
 #   "BLS Visa Appointment - User Verification"  -> код при регистрации
 #   "BLS Visa Appointment - Email Verification" -> код при заполнении анкеты
@@ -259,13 +264,15 @@ class Central:
         self.n, self.login, self.pw, self.subs = n, login.lower(), pw, subs
         self.accounts = set(subs) | {self.login}
         self.conn = None
-        self.last_uid = None
+        self.cursor = {}            # папка -> последний просмотренный UID
+        self.folders, self.folders_at = ["INBOX"], 0.0
         self.status, self.error, self.last_ok = "idle", "", 0.0
         self.fails, self.mails = 0, 0
 
     def rescan(self):
         """Заново прочитать окно BACKFILL_HOURS (уже учтённые письма пропускаются по SEEN)."""
-        self.last_uid = None
+        self.cursor = {}
+        self.folders_at = 0.0
 
     def start(self):
         threading.Thread(target=self.loop, name=f"central-{self.n}", daemon=True).start()
@@ -306,28 +313,56 @@ class Central:
             raise RuntimeError("IMAP search failed")
         return [int(x) for x in (d[0] or b"").split()]
 
+    def list_folders(self):
+        """INBOX + папки сборщика (в имени есть "@") + то, что задано в IMAP_FOLDERS."""
+        if time.time() - self.folders_at < FOLDER_REFRESH:
+            return self.folders
+        found = []
+        typ, data = self.conn.list()
+        if typ == "OK":
+            for line in data or []:
+                if not isinstance(line, bytes):
+                    continue
+                m = re.search(rb'\)\s+(?:"[^"]*"|NIL)\s+(.+)$', line)
+                if not m:
+                    continue
+                name = m.group(1).strip().strip(b'"').decode("ascii", "ignore")
+                if "@" in name:
+                    found.append(name)
+        folders = list(dict.fromkeys(["INBOX"] + EXTRA_FOLDERS + found))
+        if folders != self.folders:
+            log.info("central %s folders: %s", self.n, ", ".join(folders))
+        self.folders, self.folders_at = folders, time.time()
+        return folders
+
     def poll(self):
+        for folder in self.list_folders():
+            self.poll_folder(folder)
+
+    def poll_folder(self, folder):
         c = self.conn
-        if c.select("INBOX", readonly=True)[0] != "OK":
-            raise RuntimeError("IMAP select failed")
-        if self.last_uid is None:  # первый заход / rescan: дочитываем письма за BACKFILL_HOURS
-            self.last_uid = max(self.search("ALL"), default=0)
+        if c.select('"%s"' % folder.replace('"', ""), readonly=True)[0] != "OK":
+            log.warning("central %s: не открыть папку %s", self.n, folder)
+            return
+        last = self.cursor.get(folder)
+        if last is None:  # первый заход / rescan: дочитываем письма за BACKFILL_HOURS
+            last = max(self.search("ALL"), default=0)
+            self.cursor[folder] = last
             # SINCE работает по датам, берём с запасом в сутки; точный возраст проверяет handle()
             since = (datetime.now(timezone.utc) - timedelta(hours=BACKFILL_HOURS + 24)).strftime("%d-%b-%Y")
             uids = sorted({u for s in SENDERS for u in self.search("FROM", s, "SINCE", since)})
         else:
             uids = sorted({u for s in SENDERS
-                           for u in self.search("UID", f"{self.last_uid + 1}:*", "FROM", s)
-                           if u > self.last_uid})
-            allnew = self.search("UID", f"{self.last_uid + 1}:*")
-            self.last_uid = max([self.last_uid] + [u for u in allnew if u > self.last_uid])
-        for u in sorted(uids):
+                           for u in self.search("UID", f"{last + 1}:*", "FROM", s) if u > last})
+            allnew = self.search("UID", f"{last + 1}:*")
+            self.cursor[folder] = max([last] + [u for u in allnew if u > last])
+        for u in uids:
             _, data = c.uid("FETCH", str(u), "(BODY.PEEK[])")
             raw = next((i[1] for i in data or [] if isinstance(i, tuple)), None)
             if raw:
-                self.handle(raw, u)
+                self.handle(raw, u, folder)
 
-    def detect(self, msg, body=""):
+    def detect(self, msg, body="", folder=""):
         found = []
         for h in ("Delivered-To", "X-Original-To", "X-Forwarded-To", "Resent-To",
                   "Envelope-To", "X-Envelope-To", "Original-Recipient", "To", "Cc"):
@@ -339,9 +374,11 @@ class Central:
         d = DEAR_RE.search(body)  # "Dear alias@mail.ru" в теле письма — запасной вариант
         if d and d.group(1).lower() in self.subs:
             return d.group(1).lower()
+        if folder.lower() in self.subs:   # письмо лежит в папке сборщика этого ящика
+            return folder.lower()
         return self.login if self.login in found else ""
 
-    def handle(self, raw, uid):
+    def handle(self, raw, uid, folder="INBOX"):
         msg = email.message_from_bytes(raw)
         m = EMAIL_RE.search(str(msg.get("From", "")))
         if not m or m.group(0).lower() not in SENDERS:
@@ -364,7 +401,7 @@ class Central:
         if not (code or link):
             return
         self.mails += 1
-        ingest({"id": f"{self.n}:{uid}", "central": self.n, "account": self.detect(msg, body),
+        ingest({"id": f"{self.n}:{folder}:{uid}", "central": self.n, "account": self.detect(msg, body, folder),
                 "code": code, "link": link if kind in LINK_KINDS else "", "kind": kind,
                 "subject": subject[:80], "ts": d.timestamp(), "used_by": None})
 
